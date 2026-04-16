@@ -214,7 +214,68 @@ def get_overall_true_win_rate_text() -> str:
     if not stats:
         return "暂无历史回测数据"
     return f"{stats.get('win_rate', 0):.2f}%"
+    
+def estimate_model_win_rate(symbol: str, interval: str, scenario_key: str,
+                            score: int, rr: float, confirm_score: int, env_score: int) -> int:
+    win = 42
 
+    if score >= 85:
+        win += 22
+    elif score >= 78:
+        win += 18
+    elif score >= 72:
+        win += 14
+    elif score >= 65:
+        win += 10
+    elif score >= 58:
+        win += 6
+    else:
+        win += 2
+
+    if rr >= 2.5:
+        win += 8
+    elif rr >= 2.0:
+        win += 6
+    elif rr >= 1.8:
+        win += 5
+    elif rr >= 1.5:
+        win += 3
+
+    if confirm_score >= 20:
+        win += 8
+    elif confirm_score >= 16:
+        win += 6
+    elif confirm_score >= 12:
+        win += 4
+
+    if env_score >= 12:
+        win += 6
+    elif env_score >= 9:
+        win += 4
+    elif env_score >= 6:
+        win += 2
+
+    if symbol == "BTCUSDT":
+        win += 4
+    elif symbol == "ETHUSDT":
+        win += 3
+    elif symbol == "BNBUSDT":
+        win += 2
+
+    if interval == "4h":
+        win += 2
+
+    if scenario_key == "trend_pullback":
+        win += 3
+    elif scenario_key == "range_bottom":
+        win += 1
+    elif scenario_key == "oversold_bounce":
+        win -= 1
+
+    return int(clamp(win, 35, 88))
+# ======================================
+# 电脑版表格输出
+# ======================================
 # ======================================
 # 轻量技术指标实现（不依赖 TA-Lib）
 # ======================================
