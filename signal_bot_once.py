@@ -1125,10 +1125,10 @@ def run_one_live_cycle():
 
         if best["level"] == "entry":
             text = build_entry_message(best, dt_cn)
-            silent = False   # 只有可开单才响
+            silent = not (best["interval"] == "4h")   # 只有4h开单才响
         elif best["level"] == "warning":
             text = build_warning_message(best, dt_cn)
-            silent = True    # 预警改为静默
+            silent = True
         elif best["level"] == "watch":
             text = build_watch_message(best, dt_cn)
             silent = True
@@ -1177,11 +1177,18 @@ def send_item_with_strategy(item: dict):
         return
 
     level = item["level"]
+    interval = item["interval"]
     text = item["text"]
     silent = item["silent"]
 
     first_message_id = None
-    repeat_times = max(1, ENTRY_BURST_COUNT) if level == "entry" else 1
+
+    # 只有 4h 开单才三连提醒
+    if level == "entry" and interval == "4h":
+        repeat_times = max(1, ENTRY_BURST_COUNT)
+    else:
+        repeat_times = 1
+
     send_success = False
 
     for i in range(repeat_times):
@@ -1206,7 +1213,8 @@ def send_item_with_strategy(item: dict):
     if send_success:
         remember_sent_message(item)
 
-    if level == "entry" and PIN_ENTRY_MESSAGE and first_message_id:
+    # 只有 4h 开单才置顶
+    if level == "entry" and interval == "4h" and PIN_ENTRY_MESSAGE and first_message_id:
         try:
             if UNPIN_PREVIOUS_ENTRY_BEFORE_PIN and LAST_PINNED_MESSAGE_ID:
                 if LAST_PINNED_MESSAGE_ID != first_message_id:
