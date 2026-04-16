@@ -1123,18 +1123,18 @@ def run_one_live_cycle():
             reverse=True
         )[0]
 
-if best["level"] == "entry":
-    text = build_entry_message(best, dt_cn)
-    silent = False   # 只有可开单才响
-elif best["level"] == "warning":
-    text = build_warning_message(best, dt_cn)
-    silent = True    # 预警改为静默
-elif best["level"] == "watch":
-    text = build_watch_message(best, dt_cn)
-    silent = True
-else:
-    text = build_no_long_message(best, dt_cn)
-    silent = True
+        if best["level"] == "entry":
+            text = build_entry_message(best, dt_cn)
+            silent = False   # 只有可开单才响
+        elif best["level"] == "warning":
+            text = build_warning_message(best, dt_cn)
+            silent = True    # 预警改为静默
+        elif best["level"] == "watch":
+            text = build_watch_message(best, dt_cn)
+            silent = True
+        else:
+            text = build_no_long_message(best, dt_cn)
+            silent = True
 
         extra_errors = []
         if price_errors:
