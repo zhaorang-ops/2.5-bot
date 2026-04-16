@@ -3,7 +3,7 @@ name: Run Signal Bot
 on:
   workflow_dispatch:
   schedule:
-    - cron: "7,22,37,52 * * * *"
+    - cron: "11,26,41,56 * * * *"
 
 concurrency:
   group: signal-bot
