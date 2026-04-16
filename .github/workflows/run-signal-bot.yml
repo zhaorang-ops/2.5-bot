@@ -1,27 +1,20 @@
-# 临时修改你的yml，提交到main分支
-name: Run Signal Bot
+name: Test Schedule
 
+# 每 1 分钟运行一次 + 支持手动运行
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/1 * * * *"  # 临时改为每分钟触发
+    - cron: "*/1 * * * *"
+
+# 完全删除 concurrency，避免被杀
+# concurrency 已删除
 
 jobs:
-  run:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-      - name: Run bot once
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      - name: Print time
         run: |
-          echo "Scheduled run triggered at $(date)" >> run.log
-          python signal_bot_once.py
+          echo "✅ 定时任务成功触发！"
+          echo "当前时间（UTC）: $(date -u)"
+          echo "当前时间（北京时间）: $(date -d '+8 hours' '+%Y-%m-%d %H:%M:%S')"
