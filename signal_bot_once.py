@@ -10,7 +10,7 @@ import numpy as np
 from datetime import datetime, timezone, timedelta
 
 # ======================================
-# 基础配置
+# 你只需要改这里
 # ======================================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
@@ -23,11 +23,10 @@ BASE_URLS = [
 SYMBOLS = [
     "BTCUSDT",
     "ETHUSDT",
+    "DOGEUSDT",
+    "SOLUSDT",
     "TONUSDT",
     "BNBUSDT",
-    "LTCUSDT",
-    "SSVUSDT",
-    "DOGEUSDT",
 ]
 
 INTERVALS = ["1h", "4h"]
@@ -36,33 +35,33 @@ PRIORITY = {
     "BTCUSDT": 1,
     "ETHUSDT": 2,
     "BNBUSDT": 3,
-    "TONUSDT": 4,
-    "LTCUSDT": 5,
-    "SSVUSDT": 6,
-    "DOGEUSDT": 7,
+    "SOLUSDT": 4,
+    "TONUSDT": 5,
+    "DOGEUSDT": 6,
 }
 
 PRIORITY_BONUS = {
     "BTCUSDT": 3,
     "ETHUSDT": 2,
     "BNBUSDT": 1,
+    "SOLUSDT": 1,
     "TONUSDT": 0,
-    "LTCUSDT": 0,
-    "SSVUSDT": 0,
     "DOGEUSDT": 0,
 }
 
-# 中国/新加坡同属 UTC+8
 UTC8 = timezone(timedelta(hours=8))
 
 # ======================================
-# 请求控制
+# Binance 请求控制
 # ======================================
 CONNECT_TIMEOUT = 5
 READ_TIMEOUT = 20
 MAX_RETRIES_PER_URL = 3
 RETRY_SLEEP_SECONDS = 1.2
 
+# ======================================
+# Telegram 请求控制
+# ======================================
 TELEGRAM_CONNECT_TIMEOUT = 5
 TELEGRAM_READ_TIMEOUT = 20
 TELEGRAM_MAX_RETRIES = 3
@@ -70,14 +69,9 @@ TELEGRAM_RETRY_SLEEP_SECONDS = 1.5
 
 # ======================================
 # 通知策略
+# 只有 4h entry 才响铃 + 置顶
+# 其他全部静默
 # ======================================
-DEDUPE_LEVELS = {
-    "no_long": True,
-    "watch": True,
-    "warning": True,
-    "entry": True,
-}
-
 ENTRY_BURST_COUNT = 3
 ENTRY_BURST_GAP_SECONDS = 2
 PIN_ENTRY_MESSAGE = True
@@ -96,17 +90,21 @@ STRATEGY_CONFIG = {
     "WARNING_MIN_RR": 1.4,
 }
 
+# ======================================
+# 历史回测总体胜率文件
+# 不存在也能跑，只是显示“暂无历史回测数据”
+# ======================================
 BACKTEST_STATS_JSON_FILE = "backtest_overall_stats.json"
 
 # ======================================
 # 运行时状态
+# 单次执行版，适合 GitHub Actions
 # ======================================
-LAST_SENT_SIGNATURES = {}
 LAST_PINNED_MESSAGE_ID = None
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (github-actions-signal-bot)"
+    "User-Agent": "Mozilla/5.0 (github-signal-bot)"
 })
 
 # ======================================
@@ -118,8 +116,11 @@ def now_cn():
 def fmt_time_full(dt):
     return dt.strftime("%Y-%m-%d %H:%M")
 
+def short_symbol(symbol: str) -> str:
+    return symbol.replace("USDT", "")
+
 def fmt_price(symbol: str, price: float) -> str:
-    if symbol in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "LTCUSDT", "SSVUSDT"):
+    if symbol in ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT"):
         return f"{price:.4f}".rstrip("0").rstrip(".")
     return f"{price:.6f}".rstrip("0").rstrip(".")
 
@@ -131,12 +132,9 @@ def calc_pct(a: float, b: float) -> float:
         return 0.0
     return abs(a - b) / abs(b) * 100.0
 
-def short_symbol(symbol: str) -> str:
-    return symbol.replace("USDT", "")
-
 def level_priority(level: str) -> int:
     mp = {
-        "no_long": 0,
+        "no_trade": 0,
         "watch": 1,
         "warning": 2,
         "entry": 3,
@@ -167,40 +165,11 @@ def suggest_position(score: int, interval: str) -> str:
         if score >= 78:
             return "20%"
         return "10%"
-
     if score >= 84:
         return "20%"
     if score >= 75:
         return "10%"
     return "5%"
-
-def build_dedupe_signature(level: str, interval: str, text: str) -> str:
-    lines = []
-    for line in text.splitlines():
-        clean = line.strip()
-        if clean.startswith("时间（中国）："):
-            continue
-        lines.append(clean)
-    normalized = "\n".join(lines)
-    return f"{level}:{interval}:{normalized}"
-
-def should_send_message(item: dict) -> bool:
-    level = item["level"]
-    interval = item["interval"]
-
-    if not DEDUPE_LEVELS.get(level, False):
-        item["signature"] = None
-        return True
-
-    signature = build_dedupe_signature(level, interval, item["text"])
-    item["signature"] = signature
-    last_signature = LAST_SENT_SIGNATURES.get(f"{level}:{interval}")
-    return signature != last_signature
-
-def remember_sent_message(item: dict):
-    signature = item.get("signature")
-    if signature:
-        LAST_SENT_SIGNATURES[f"{item['level']}:{item['interval']}"] = signature
 
 def load_overall_backtest_stats():
     try:
@@ -214,68 +183,7 @@ def get_overall_true_win_rate_text() -> str:
     if not stats:
         return "暂无历史回测数据"
     return f"{stats.get('win_rate', 0):.2f}%"
-    
-def estimate_model_win_rate(symbol: str, interval: str, scenario_key: str,
-                            score: int, rr: float, confirm_score: int, env_score: int) -> int:
-    win = 42
 
-    if score >= 85:
-        win += 22
-    elif score >= 78:
-        win += 18
-    elif score >= 72:
-        win += 14
-    elif score >= 65:
-        win += 10
-    elif score >= 58:
-        win += 6
-    else:
-        win += 2
-
-    if rr >= 2.5:
-        win += 8
-    elif rr >= 2.0:
-        win += 6
-    elif rr >= 1.8:
-        win += 5
-    elif rr >= 1.5:
-        win += 3
-
-    if confirm_score >= 20:
-        win += 8
-    elif confirm_score >= 16:
-        win += 6
-    elif confirm_score >= 12:
-        win += 4
-
-    if env_score >= 12:
-        win += 6
-    elif env_score >= 9:
-        win += 4
-    elif env_score >= 6:
-        win += 2
-
-    if symbol == "BTCUSDT":
-        win += 4
-    elif symbol == "ETHUSDT":
-        win += 3
-    elif symbol == "BNBUSDT":
-        win += 2
-
-    if interval == "4h":
-        win += 2
-
-    if scenario_key == "trend_pullback":
-        win += 3
-    elif scenario_key == "range_bottom":
-        win += 1
-    elif scenario_key == "oversold_bounce":
-        win -= 1
-
-    return int(clamp(win, 35, 88))
-# ======================================
-# 电脑版表格输出
-# ======================================
 # ======================================
 # 轻量技术指标实现（不依赖 TA-Lib）
 # ======================================
@@ -333,12 +241,12 @@ def macd(arr: np.ndarray, fast: int = 12, slow: int = 26, signal: int = 9):
 
 def bbands(arr: np.ndarray, period: int = 20, nbdev: float = 2.0):
     mid = sma(arr, period)
-    out_std = np.full_like(arr, np.nan, dtype=float)
+    std = np.full_like(arr, np.nan, dtype=float)
     if len(arr) >= period:
         for i in range(period - 1, len(arr)):
-            out_std[i] = np.std(arr[i - period + 1:i + 1], ddof=0)
-    upper = mid + nbdev * out_std
-    lower = mid - nbdev * out_std
+            std[i] = np.std(arr[i - period + 1:i + 1], ddof=0)
+    upper = mid + nbdev * std
+    lower = mid - nbdev * std
     return upper, mid, lower
 
 def atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14):
@@ -351,7 +259,7 @@ def atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14):
             abs(low[i] - close[i - 1]),
         )
     out = np.full_like(close, np.nan, dtype=float)
-    if len(close) <= period:
+    if len(close) < period:
         return out
     out[period - 1] = np.nanmean(tr[:period])
     for i in range(period, len(close)):
@@ -393,11 +301,12 @@ def print_live_desktop_report(all_rows: List[dict], dt_cn: datetime):
     columns = [
         ("币种", 8, "symbol"),
         ("周期", 4, "interval"),
+        ("方向", 4, "side"),
         ("状态", 8, "status"),
         ("思路", 10, "scenario_name"),
         ("当前价", 12, "latest_price"),
         ("预警区间", 23, "watch_zone"),
-        ("做多区间", 23, "entry_zone"),
+        ("开单区间", 23, "entry_zone"),
         ("止损", 12, "stop_loss"),
         ("止盈", 12, "take_profit"),
         ("盈亏比", 7, "rr"),
@@ -405,12 +314,11 @@ def print_live_desktop_report(all_rows: List[dict], dt_cn: datetime):
         ("总体真胜", 10, "overall_true_win_rate"),
         ("评分", 6, "score"),
     ]
-
-    print("\n" + "=" * 175)
+    print("\n" + "=" * 185)
     print(f"桌面行情总表｜时间（中国）：{fmt_time_full(dt_cn)}")
-    print("=" * 175)
+    print("=" * 185)
     print(build_ascii_table(all_rows, columns))
-    print("=" * 175 + "\n")
+    print("=" * 185 + "\n")
 
 # ======================================
 # Telegram
@@ -438,11 +346,9 @@ def telegram_api_post(method: str, payload: dict):
         except requests.exceptions.Timeout as e:
             last_error = e
             print(f"[Telegram超时] method={method} attempt={attempt}/{TELEGRAM_MAX_RETRIES} error={e}")
-
         except requests.exceptions.RequestException as e:
             last_error = e
             print(f"[Telegram请求异常] method={method} attempt={attempt}/{TELEGRAM_MAX_RETRIES} error={e}")
-
         except Exception as e:
             last_error = e
             print(f"[Telegram其他异常] method={method} attempt={attempt}/{TELEGRAM_MAX_RETRIES} error={e}")
@@ -492,18 +398,13 @@ def request_json_with_retry(path: str, params: dict):
 
         for attempt in range(1, MAX_RETRIES_PER_URL + 1):
             try:
-                r = SESSION.get(
-                    url,
-                    params=params,
-                    timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
-                )
+                r = SESSION.get(url, params=params, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
                 r.raise_for_status()
                 return r.json()
 
             except requests.exceptions.Timeout as e:
                 last_error = e
                 print(f"[超时] {url} params={params} attempt={attempt}/{MAX_RETRIES_PER_URL} error={e}")
-
             except requests.exceptions.RequestException as e:
                 last_error = e
                 print(f"[请求异常] {url} params={params} attempt={attempt}/{MAX_RETRIES_PER_URL} error={e}")
@@ -542,8 +443,9 @@ def fetch_klines_live(symbol: str, interval: str, limit: int = 300):
 # 指标计算
 # ======================================
 def calc_indicators_live(symbol: str, interval: str):
-    data = fetch_klines_live(symbol, interval, 300)
+    data = fetch_klines_live(symbol, interval, 320)
 
+    # 只用已完成K线，去掉最后一根未完成K线
     opens = data["opens"][:-1]
     highs = data["highs"][:-1]
     lows = data["lows"][:-1]
@@ -599,7 +501,6 @@ def calc_indicators_live(symbol: str, interval: str):
         "recent_high_20": float(np.max(highs[-20:])),
         "recent_low_30": float(np.min(lows[-30:])),
         "recent_high_30": float(np.max(highs[-30:])),
-        "breakout_trigger": float(np.max(highs[-21:-1])) if len(highs) >= 21 else float(np.max(highs[:-1])),
         "body": body,
         "lower_wick": lower_wick,
         "upper_wick": upper_wick,
@@ -608,14 +509,47 @@ def calc_indicators_live(symbol: str, interval: str):
     }
 
 # ======================================
-# 打分系统
+# 日线方向过滤
 # ======================================
-def evaluate_environment(ind: dict) -> int:
+def get_daily_bias(ind_d1: dict) -> str:
+    long_score = 0
+    short_score = 0
+
+    if ind_d1["ema20"] > ind_d1["sma50"]:
+        long_score += 2
+    else:
+        short_score += 2
+
+    if ind_d1["macd"] > ind_d1["macd_signal"]:
+        long_score += 2
+    else:
+        short_score += 2
+
+    if ind_d1["last_close"] > ind_d1["bb_middle"]:
+        long_score += 2
+    else:
+        short_score += 2
+
+    if ind_d1["rsi14"] >= 48:
+        long_score += 1
+    if ind_d1["rsi14"] <= 52:
+        short_score += 1
+
+    if long_score >= 5 and long_score > short_score:
+        return "long_only"
+    if short_score >= 5 and short_score > long_score:
+        return "short_only"
+    return "neutral"
+
+# ======================================
+# 环境分
+# ======================================
+def evaluate_environment_long(ind: dict) -> int:
     score = 0
 
     if ind["ema20"] > ind["sma50"]:
         score += 4
-    elif calc_pct(ind["ema20"], ind["sma50"]) <= 0.8:
+    elif calc_pct(ind["ema20"], ind["sma50"]) <= 1.0:
         score += 2
 
     if ind["macd"] > ind["macd_signal"]:
@@ -623,21 +557,47 @@ def evaluate_environment(ind: dict) -> int:
     elif ind["macd_hist"] > ind["macd_hist_prev"]:
         score += 2
 
-    if ind["last_close"] > ind["ema20"]:
+    if ind["last_close"] > ind["bb_middle"]:
         score += 3
-    elif ind["last_close"] > ind["bb_middle"]:
-        score += 1
+    elif ind["last_close"] > ind["ema20"]:
+        score += 2
 
-    if 35 <= ind["rsi14"] <= 68:
+    if 35 <= ind["rsi14"] <= 70:
         score += 4
     elif 28 <= ind["rsi14"] < 35:
         score += 2
-    elif 68 < ind["rsi14"] <= 72:
-        score += 1
 
     return int(clamp(score, 0, 15))
 
-def compute_confirmation_score(ind: dict, latest_price: float) -> Tuple[int, List[str]]:
+def evaluate_environment_short(ind: dict) -> int:
+    score = 0
+
+    if ind["ema20"] < ind["sma50"]:
+        score += 4
+    elif calc_pct(ind["ema20"], ind["sma50"]) <= 1.0:
+        score += 2
+
+    if ind["macd"] < ind["macd_signal"]:
+        score += 4
+    elif ind["macd_hist"] < ind["macd_hist_prev"]:
+        score += 2
+
+    if ind["last_close"] < ind["bb_middle"]:
+        score += 3
+    elif ind["last_close"] < ind["ema20"]:
+        score += 2
+
+    if 30 <= ind["rsi14"] <= 65:
+        score += 4
+    elif 65 < ind["rsi14"] <= 72:
+        score += 2
+
+    return int(clamp(score, 0, 15))
+
+# ======================================
+# 确认分
+# ======================================
+def compute_confirmation_score_long(ind: dict, latest_price: float) -> Tuple[int, List[str]]:
     score = 0
     notes = []
 
@@ -667,14 +627,135 @@ def compute_confirmation_score(ind: dict, latest_price: float) -> Tuple[int, Lis
 
     return int(clamp(score, 0, 30)), notes
 
+def compute_confirmation_score_short(ind: dict, latest_price: float) -> Tuple[int, List[str]]:
+    score = 0
+    notes = []
+
+    if ind["last_close"] < ind["last_open"]:
+        score += 6
+        notes.append("上一根K线收阴")
+
+    if ind["upper_wick_ratio"] >= 1.2:
+        score += 5
+        notes.append("上影线较明显")
+
+    if latest_price < ind["last_close"]:
+        score += 6
+        notes.append("当前价弱于上一收盘")
+
+    if ind["rsi14"] < ind["rsi14_prev"]:
+        score += 5
+        notes.append("RSI开始回落")
+
+    if ind["macd_hist"] < ind["macd_hist_prev"]:
+        score += 6
+        notes.append("MACD多头动能减弱")
+
+    if ind["last_high"] <= ind["recent_high_10"] * 1.002:
+        score += 2
+        notes.append("短线高点未明显突破")
+
+    return int(clamp(score, 0, 30)), notes
+
+# ======================================
+# RR
+# ======================================
+def calc_rr_by_side(entry: float, stop: float, target: float, side: str) -> float:
+    if side == "long":
+        risk = entry - stop
+        reward = target - entry
+    else:
+        risk = stop - entry
+        reward = entry - target
+
+    if risk <= 0 or reward <= 0:
+        return 0.0
+    return reward / risk
+
+# ======================================
+# 评分和胜率
+# ======================================
+def estimate_model_win_rate(side: str, symbol: str, interval: str, scenario_key: str,
+                            score: int, rr: float, confirm_score: int, env_score: int) -> int:
+    win = 42
+
+    if score >= 85:
+        win += 22
+    elif score >= 78:
+        win += 18
+    elif score >= 72:
+        win += 14
+    elif score >= 65:
+        win += 10
+    elif score >= 58:
+        win += 6
+    else:
+        win += 2
+
+    if rr >= 2.5:
+        win += 8
+    elif rr >= 2.0:
+        win += 6
+    elif rr >= 1.8:
+        win += 5
+    elif rr >= 1.5:
+        win += 3
+
+    if confirm_score >= 20:
+        win += 8
+    elif confirm_score >= 16:
+        win += 6
+    elif confirm_score >= 12:
+        win += 4
+
+    if env_score >= 12:
+        win += 6
+    elif env_score >= 9:
+        win += 4
+    elif env_score >= 6:
+        win += 2
+
+    if symbol == "BTCUSDT":
+        win += 4
+    elif symbol == "ETHUSDT":
+        win += 3
+    elif symbol == "BNBUSDT":
+        win += 2
+    elif symbol == "SOLUSDT":
+        win += 1
+
+    if interval == "4h":
+        win += 2
+
+    if scenario_key in ("trend_pullback_long", "trend_pullback_short"):
+        win += 3
+    elif scenario_key in ("range_bottom_long", "range_top_short"):
+        win += 1
+    elif scenario_key in ("oversold_bounce_long", "overbought_reversal_short"):
+        win -= 1
+
+    if side == "short":
+        win -= 1
+
+    return int(clamp(win, 35, 88))
+
+# ======================================
+# 统一打分
+# ======================================
 def score_by_location(latest_price: float, zone_low: float, zone_high: float,
-                      watch_low: float, watch_high: float, stop: float) -> int:
+                      watch_low: float, watch_high: float, stop: float, side: str) -> int:
     if zone_low <= latest_price <= zone_high:
         return 35
+
     if watch_low <= latest_price <= watch_high:
         return 25
-    if latest_price < zone_low and latest_price > stop:
-        return 18
+
+    if side == "long":
+        if latest_price < zone_low and latest_price > stop:
+            return 18
+    else:
+        if latest_price > zone_high and latest_price < stop:
+            return 18
 
     mid = (zone_low + zone_high) / 2.0
     dist_pct = calc_pct(latest_price, mid)
@@ -687,13 +768,6 @@ def score_by_location(latest_price: float, zone_low: float, zone_high: float,
         return 7
     return 3
 
-def calc_rr(entry: float, stop: float, target: float) -> float:
-    risk = entry - stop
-    reward = target - entry
-    if risk <= 0 or reward <= 0:
-        return 0.0
-    return reward / risk
-
 def apply_plan_grade(plan: dict, latest_price: float, cfg: dict) -> dict:
     in_entry = plan["entry_zone_low"] <= latest_price <= plan["entry_zone_high"]
     in_watch = plan["watch_zone_low"] <= latest_price <= plan["watch_zone_high"]
@@ -705,8 +779,9 @@ def apply_plan_grade(plan: dict, latest_price: float, cfg: dict) -> dict:
         and plan["confirm_score"] >= cfg["ENTRY_MIN_CONFIRM_SCORE"]
     ):
         plan["level"] = "entry"
-        plan["status"] = "可开多"
-        plan["action"] = "已进入做多区间，且盈亏比合适，可执行开多。"
+        plan["status"] = "可开多" if plan["side"] == "long" else "可开空"
+        plan["action"] = "已进入开单区间，且盈亏比合适，可执行。"
+
     elif (
         plan["rr"] >= cfg["WARNING_MIN_RR"]
         and plan["score"] >= cfg["WARNING_MIN_SCORE"]
@@ -714,17 +789,20 @@ def apply_plan_grade(plan: dict, latest_price: float, cfg: dict) -> dict:
     ):
         plan["level"] = "warning"
         plan["status"] = "预警"
-        plan["action"] = "已接近或进入做多区间，开始盯盘，等进一步确认。"
+        plan["action"] = "已接近或进入开单区间，开始盯盘，等进一步确认。"
+
     elif plan["score"] >= cfg["WATCH_MIN_SCORE"]:
         plan["level"] = "watch"
         plan["status"] = "观望"
         plan["action"] = "位置开始有价值，但还没到最优开单状态，继续观望。"
+
     else:
-        plan["level"] = "no_long"
-        plan["status"] = "暂不做多"
-        plan["action"] = "当前价格、确认或盈亏比不理想，暂不做多。"
+        plan["level"] = "no_trade"
+        plan["status"] = "暂不做单"
+        plan["action"] = "当前价格、确认或盈亏比不理想，暂不做单。"
 
     plan["model_win_rate"] = estimate_model_win_rate(
+        side=plan["side"],
         symbol=plan["symbol"],
         interval=plan["interval"],
         scenario_key=plan["scenario_key"],
@@ -735,7 +813,7 @@ def apply_plan_grade(plan: dict, latest_price: float, cfg: dict) -> dict:
     )
     return plan
 
-def finalize_plan(symbol: str, interval: str, latest_price: float, ind: dict,
+def finalize_plan(symbol: str, interval: str, side: str, latest_price: float, ind: dict,
                   env_score: int, scenario_key: str, scenario_name: str,
                   watch_zone_low: float, watch_zone_high: float,
                   entry_zone_low: float, entry_zone_high: float,
@@ -751,12 +829,16 @@ def finalize_plan(symbol: str, interval: str, latest_price: float, ind: dict,
         watch_zone_low,
         watch_zone_high,
         stop_loss,
+        side,
     )
 
-    confirm_score, confirm_notes = compute_confirmation_score(ind, latest_price)
+    if side == "long":
+        confirm_score, confirm_notes = compute_confirmation_score_long(ind, latest_price)
+    else:
+        confirm_score, confirm_notes = compute_confirmation_score_short(ind, latest_price)
 
     reference_entry = latest_price if entry_zone_low <= latest_price <= entry_zone_high else (entry_zone_low + entry_zone_high) / 2.0
-    rr = calc_rr(reference_entry, stop_loss, take_profit)
+    rr = calc_rr_by_side(reference_entry, stop_loss, take_profit, side)
     rr_score = rr_to_score(rr)
 
     total_score = int(clamp(
@@ -767,6 +849,7 @@ def finalize_plan(symbol: str, interval: str, latest_price: float, ind: dict,
     plan = {
         "symbol": symbol,
         "interval": interval,
+        "side": side,
         "scenario_key": scenario_key,
         "scenario_name": scenario_name,
         "latest_price": latest_price,
@@ -783,18 +866,19 @@ def finalize_plan(symbol: str, interval: str, latest_price: float, ind: dict,
         "stop_loss": stop_loss,
         "take_profit": take_profit,
         "confirm_notes": confirm_notes,
-        "level": "no_long",
-        "status": "暂不做多",
-        "action": "当前价格、确认或盈亏比不理想，暂不做多。",
+        "level": "no_trade",
+        "status": "暂不做单",
+        "action": "当前价格、确认或盈亏比不理想，暂不做单。",
         "model_win_rate": 0,
     }
 
     return apply_plan_grade(plan, latest_price, cfg)
 
 # ======================================
-# 三类做多方案
+# 做多方案
 # ======================================
-def build_trend_pullback_plan(symbol: str, interval: str, latest_price: float, ind: dict, env_score: int, cfg: dict):
+def build_trend_pullback_long(symbol: str, interval: str, latest_price: float, ind: dict, cfg: dict):
+    env_score = evaluate_environment_long(ind)
     support = max(ind["ema20"], ind["bb_middle"])
     atr_v = max(ind["atr14"], latest_price * 0.002)
 
@@ -805,20 +889,18 @@ def build_trend_pullback_plan(symbol: str, interval: str, latest_price: float, i
     entry_zone_high = support + 0.12 * atr_v
 
     stop_loss = min(ind["recent_low_10"], entry_zone_low) - 0.35 * atr_v
-    take_profit = max(ind["recent_high_20"], ind["bb_upper"], ind["breakout_trigger"])
-    if take_profit <= entry_zone_high:
-        take_profit = entry_zone_high + 2.2 * atr_v
+    take_profit = latest_price * 1.025
 
     return finalize_plan(
-        symbol, interval, latest_price, ind, env_score,
-        "trend_pullback", "趋势回踩做多",
+        symbol, interval, "long", latest_price, ind, env_score,
+        "trend_pullback_long", "趋势回踩做多",
         watch_zone_low, watch_zone_high,
         entry_zone_low, entry_zone_high,
-        stop_loss, take_profit,
-        cfg
+        stop_loss, take_profit, cfg
     )
 
-def build_oversold_bounce_plan(symbol: str, interval: str, latest_price: float, ind: dict, env_score: int, cfg: dict):
+def build_oversold_bounce_long(symbol: str, interval: str, latest_price: float, ind: dict, cfg: dict):
+    env_score = evaluate_environment_long(ind)
     atr_v = max(ind["atr14"], latest_price * 0.002)
     base = min(ind["bb_lower"], ind["recent_low_10"])
 
@@ -829,31 +911,18 @@ def build_oversold_bounce_plan(symbol: str, interval: str, latest_price: float, 
     entry_zone_high = base + 0.18 * atr_v
 
     stop_loss = entry_zone_low - 0.45 * atr_v
-    take_profit = max(ind["bb_middle"], ind["ema20"], ind["recent_high_10"])
-    if take_profit <= entry_zone_high:
-        take_profit = entry_zone_high + 2.0 * atr_v
+    take_profit = latest_price * 1.025
 
-    plan = finalize_plan(
-        symbol, interval, latest_price, ind, env_score,
-        "oversold_bounce", "超跌反弹做多",
+    return finalize_plan(
+        symbol, interval, "long", latest_price, ind, env_score,
+        "oversold_bounce_long", "超跌反弹做多",
         watch_zone_low, watch_zone_high,
         entry_zone_low, entry_zone_high,
-        stop_loss, take_profit,
-        cfg
+        stop_loss, take_profit, cfg
     )
 
-    if ind["rsi14"] > 48 and latest_price > ind["bb_middle"]:
-        plan["score"] = max(0, plan["score"] - 12)
-        plan = apply_plan_grade(plan, latest_price, cfg)
-        if plan["level"] == "entry":
-            plan["level"] = "warning"
-            plan["status"] = "预警"
-            plan["action"] = "虽然在区间附近，但并非典型超跌环境，先观察。"
-            plan["model_win_rate"] = max(35, plan["model_win_rate"] - 5)
-
-    return plan
-
-def build_range_bottom_plan(symbol: str, interval: str, latest_price: float, ind: dict, env_score: int, cfg: dict):
+def build_range_bottom_long(symbol: str, interval: str, latest_price: float, ind: dict, cfg: dict):
+    env_score = evaluate_environment_long(ind)
     atr_v = max(ind["atr14"], latest_price * 0.002)
     box_low = ind["recent_low_20"]
     box_high = ind["recent_high_20"]
@@ -869,51 +938,169 @@ def build_range_bottom_plan(symbol: str, interval: str, latest_price: float, ind
     entry_zone_high = box_low + 0.14 * box_width
 
     stop_loss = box_low - 0.10 * box_width - 0.25 * atr_v
-    take_profit = box_low + 0.72 * box_width
-    if take_profit <= entry_zone_high:
-        take_profit = entry_zone_high + 1.8 * atr_v
+    take_profit = latest_price * 1.025
 
-    plan = finalize_plan(
-        symbol, interval, latest_price, ind, env_score,
-        "range_bottom", "箱体下沿做多",
+    return finalize_plan(
+        symbol, interval, "long", latest_price, ind, env_score,
+        "range_bottom_long", "箱体下沿做多",
         watch_zone_low, watch_zone_high,
         entry_zone_low, entry_zone_high,
-        stop_loss, take_profit,
-        cfg
+        stop_loss, take_profit, cfg
     )
 
-    width_pct = box_width / max(latest_price, 1e-9) * 100.0
-    if width_pct < 1.2 or width_pct > 15:
-        plan["score"] = max(0, plan["score"] - 15)
-        plan = apply_plan_grade(plan, latest_price, cfg)
-        plan["model_win_rate"] = max(35, plan["model_win_rate"] - 6)
+# ======================================
+# 做空方案
+# ======================================
+def build_trend_pullback_short(symbol: str, interval: str, latest_price: float, ind: dict, cfg: dict):
+    env_score = evaluate_environment_short(ind)
+    resistance = min(ind["ema20"], ind["bb_middle"]) if ind["ema20"] < ind["bb_middle"] else ind["bb_middle"]
+    atr_v = max(ind["atr14"], latest_price * 0.002)
 
-    return plan
+    watch_zone_low = resistance - 0.75 * atr_v
+    watch_zone_high = resistance - 0.15 * atr_v
+
+    entry_zone_low = resistance - 0.12 * atr_v
+    entry_zone_high = resistance + 0.18 * atr_v
+
+    stop_loss = max(ind["recent_high_10"], entry_zone_high) + 0.35 * atr_v
+    take_profit = latest_price * 0.975
+
+    return finalize_plan(
+        symbol, interval, "short", latest_price, ind, env_score,
+        "trend_pullback_short", "趋势回抽做空",
+        watch_zone_low, watch_zone_high,
+        entry_zone_low, entry_zone_high,
+        stop_loss, take_profit, cfg
+    )
+
+def build_overbought_reversal_short(symbol: str, interval: str, latest_price: float, ind: dict, cfg: dict):
+    env_score = evaluate_environment_short(ind)
+    atr_v = max(ind["atr14"], latest_price * 0.002)
+    base = max(ind["bb_upper"], ind["recent_high_10"])
+
+    watch_zone_low = base - 0.85 * atr_v
+    watch_zone_high = base - 0.20 * atr_v
+
+    entry_zone_low = base - 0.18 * atr_v
+    entry_zone_high = base + 0.12 * atr_v
+
+    stop_loss = entry_zone_high + 0.45 * atr_v
+    take_profit = latest_price * 0.975
+
+    return finalize_plan(
+        symbol, interval, "short", latest_price, ind, env_score,
+        "overbought_reversal_short", "超涨回落做空",
+        watch_zone_low, watch_zone_high,
+        entry_zone_low, entry_zone_high,
+        stop_loss, take_profit, cfg
+    )
+
+def build_range_top_short(symbol: str, interval: str, latest_price: float, ind: dict, cfg: dict):
+    env_score = evaluate_environment_short(ind)
+    atr_v = max(ind["atr14"], latest_price * 0.002)
+    box_low = ind["recent_low_20"]
+    box_high = ind["recent_high_20"]
+    box_width = box_high - box_low
+
+    if box_width <= 0:
+        box_width = atr_v * 3
+
+    watch_zone_low = box_high - 0.28 * box_width
+    watch_zone_high = box_high - 0.14 * box_width
+
+    entry_zone_low = box_high - 0.14 * box_width
+    entry_zone_high = box_high - 0.02 * box_width
+
+    stop_loss = box_high + 0.10 * box_width + 0.25 * atr_v
+    take_profit = latest_price * 0.975
+
+    return finalize_plan(
+        symbol, interval, "short", latest_price, ind, env_score,
+        "range_top_short", "箱体上沿做空",
+        watch_zone_low, watch_zone_high,
+        entry_zone_low, entry_zone_high,
+        stop_loss, take_profit, cfg
+    )
 
 # ======================================
 # 单币评估
 # ======================================
-def evaluate_symbol(symbol: str, interval: str, latest_price: float, ind: dict, env_ind_4h: Optional[dict], cfg: dict):
-    if interval == "1h" and env_ind_4h is not None:
-        env_score = evaluate_environment(env_ind_4h)
-    else:
-        env_score = evaluate_environment(ind)
+def build_bias_locked_result(symbol: str, interval: str, latest_price: float, bias: str) -> dict:
+    reason = "日线方向中性，暂不做单。"
+    if bias == "long_only":
+        reason = "日线只允许做多。"
+    elif bias == "short_only":
+        reason = "日线只允许做空。"
 
-    plans = [
-        build_trend_pullback_plan(symbol, interval, latest_price, ind, env_score, cfg),
-        build_oversold_bounce_plan(symbol, interval, latest_price, ind, env_score, cfg),
-        build_range_bottom_plan(symbol, interval, latest_price, ind, env_score, cfg),
-    ]
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "side": "none",
+        "scenario_key": "bias_filter",
+        "scenario_name": "日线方向过滤",
+        "latest_price": latest_price,
+        "env_score": 0,
+        "location_score": 0,
+        "confirm_score": 0,
+        "rr_score": 0,
+        "score": 0,
+        "rr": 0.0,
+        "watch_zone_low": latest_price,
+        "watch_zone_high": latest_price,
+        "entry_zone_low": latest_price,
+        "entry_zone_high": latest_price,
+        "stop_loss": latest_price,
+        "take_profit": latest_price,
+        "confirm_notes": [],
+        "level": "no_trade",
+        "status": "暂不做单",
+        "action": reason,
+        "model_win_rate": 0,
+    }
 
-    if latest_price < ind["recent_low_10"] and ind["macd_hist"] < ind["macd_hist_prev"] and ind["rsi14"] < 35:
-        for p in plans:
-            p["score"] = max(0, p["score"] - 10)
-            p = apply_plan_grade(p, latest_price, cfg)
-            if p["level"] == "entry":
-                p["level"] = "warning"
-                p["status"] = "预警"
-                p["action"] = "虽然价格接近做多区，但跌势仍偏急，先等进一步止跌确认。"
-                p["model_win_rate"] = max(35, p["model_win_rate"] - 5)
+def evaluate_symbol(symbol: str, interval: str, latest_price: float, ind: dict, ind_d1: dict, cfg: dict):
+    bias = get_daily_bias(ind_d1)
+
+    if bias == "neutral":
+        return build_bias_locked_result(symbol, interval, latest_price, bias)
+
+    plans = []
+
+    if bias == "long_only":
+        plans.extend([
+            build_trend_pullback_long(symbol, interval, latest_price, ind, cfg),
+            build_oversold_bounce_long(symbol, interval, latest_price, ind, cfg),
+            build_range_bottom_long(symbol, interval, latest_price, ind, cfg),
+        ])
+
+        # 明显加速下跌时，削弱做多
+        if latest_price < ind["recent_low_10"] and ind["macd_hist"] < ind["macd_hist_prev"] and ind["rsi14"] < 35:
+            for p in plans:
+                p["score"] = max(0, p["score"] - 10)
+                p = apply_plan_grade(p, latest_price, cfg)
+                if p["level"] == "entry":
+                    p["level"] = "warning"
+                    p["status"] = "预警"
+                    p["action"] = "价格接近做多区，但跌势仍偏急，先等进一步止跌确认。"
+                    p["model_win_rate"] = max(35, p["model_win_rate"] - 5)
+
+    elif bias == "short_only":
+        plans.extend([
+            build_trend_pullback_short(symbol, interval, latest_price, ind, cfg),
+            build_overbought_reversal_short(symbol, interval, latest_price, ind, cfg),
+            build_range_top_short(symbol, interval, latest_price, ind, cfg),
+        ])
+
+        # 明显加速拉升时，削弱做空
+        if latest_price > ind["recent_high_10"] and ind["macd_hist"] > ind["macd_hist_prev"] and ind["rsi14"] > 65:
+            for p in plans:
+                p["score"] = max(0, p["score"] - 10)
+                p = apply_plan_grade(p, latest_price, cfg)
+                if p["level"] == "entry":
+                    p["level"] = "warning"
+                    p["status"] = "预警"
+                    p["action"] = "价格接近做空区，但拉升仍偏急，先等进一步冲高回落确认。"
+                    p["model_win_rate"] = max(35, p["model_win_rate"] - 5)
 
     best = sorted(
         plans,
@@ -931,20 +1118,21 @@ def evaluate_symbol(symbol: str, interval: str, latest_price: float, ind: dict, 
 # ======================================
 # 消息模板
 # ======================================
-def build_no_long_message(best: dict, dt_cn: datetime) -> str:
+def side_text(side: str) -> str:
+    if side == "long":
+        return "做多"
+    if side == "short":
+        return "做空"
+    return "中性"
+
+def build_no_trade_message(best: dict, dt_cn: datetime) -> str:
     symbol = short_symbol(best["symbol"])
     return (
-        f"⛔【{symbol} {best['interval']}暂不做多】\n"
+        f"⛔【{symbol} {best['interval']}暂不做单】\n"
         f"时间（中国）：{fmt_time_full(dt_cn)}\n"
         f"当前价格：{fmt_price(best['symbol'], best['latest_price'])}\n"
-        f"做多思路：{best['scenario_name']}\n"
-        f"关注区间：{fmt_price(best['symbol'], best['watch_zone_low'])} - {fmt_price(best['symbol'], best['watch_zone_high'])}\n"
-        f"做多区间：{fmt_price(best['symbol'], best['entry_zone_low'])} - {fmt_price(best['symbol'], best['entry_zone_high'])}\n"
-        f"预计止损：{fmt_price(best['symbol'], best['stop_loss'])}\n"
-        f"预计止盈：{fmt_price(best['symbol'], best['take_profit'])}\n"
-        f"盈亏比：{best['rr']:.2f}\n"
-        f"模型胜率：{best['model_win_rate']}%\n"
-        f"评分：{best['score']}\n"
+        f"方向：{side_text(best['side'])}\n"
+        f"思路：{best['scenario_name']}\n"
         f"结论：{best['action']}"
     )
 
@@ -954,11 +1142,12 @@ def build_watch_message(best: dict, dt_cn: datetime) -> str:
         f"⏸️【{symbol} {best['interval']}观望】\n"
         f"时间（中国）：{fmt_time_full(dt_cn)}\n"
         f"当前价格：{fmt_price(best['symbol'], best['latest_price'])}\n"
-        f"做多思路：{best['scenario_name']}\n"
+        f"方向：{side_text(best['side'])}\n"
+        f"思路：{best['scenario_name']}\n"
         f"预警区间：{fmt_price(best['symbol'], best['watch_zone_low'])} - {fmt_price(best['symbol'], best['watch_zone_high'])}\n"
-        f"做多区间：{fmt_price(best['symbol'], best['entry_zone_low'])} - {fmt_price(best['symbol'], best['entry_zone_high'])}\n"
-        f"预计止损：{fmt_price(best['symbol'], best['stop_loss'])}\n"
-        f"预计止盈：{fmt_price(best['symbol'], best['take_profit'])}\n"
+        f"开单区间：{fmt_price(best['symbol'], best['entry_zone_low'])} - {fmt_price(best['symbol'], best['entry_zone_high'])}\n"
+        f"止损：{fmt_price(best['symbol'], best['stop_loss'])}\n"
+        f"止盈：{fmt_price(best['symbol'], best['take_profit'])}\n"
         f"盈亏比：{best['rr']:.2f}\n"
         f"模型胜率：{best['model_win_rate']}%\n"
         f"评分：{best['score']}\n"
@@ -974,11 +1163,12 @@ def build_warning_message(best: dict, dt_cn: datetime) -> str:
         f"⚠️【{symbol} {best['interval']}预警】\n"
         f"时间（中国）：{fmt_time_full(dt_cn)}\n"
         f"当前价格：{fmt_price(best['symbol'], best['latest_price'])}\n"
-        f"做多思路：{best['scenario_name']}\n"
+        f"方向：{side_text(best['side'])}\n"
+        f"思路：{best['scenario_name']}\n"
         f"预警区间：{fmt_price(best['symbol'], best['watch_zone_low'])} - {fmt_price(best['symbol'], best['watch_zone_high'])}\n"
-        f"做多区间：{fmt_price(best['symbol'], best['entry_zone_low'])} - {fmt_price(best['symbol'], best['entry_zone_high'])}\n"
-        f"预计止损：{fmt_price(best['symbol'], best['stop_loss'])}\n"
-        f"预计止盈：{fmt_price(best['symbol'], best['take_profit'])}\n"
+        f"开单区间：{fmt_price(best['symbol'], best['entry_zone_low'])} - {fmt_price(best['symbol'], best['entry_zone_high'])}\n"
+        f"止损：{fmt_price(best['symbol'], best['stop_loss'])}\n"
+        f"止盈：{fmt_price(best['symbol'], best['take_profit'])}\n"
         f"预计盈亏比：{best['rr']:.2f}\n"
         f"模型胜率：{best['model_win_rate']}%\n"
         f"总体真实胜率：{overall_true_win_rate}\n"
@@ -993,13 +1183,15 @@ def build_entry_message(best: dict, dt_cn: datetime) -> str:
     position = suggest_position(best["score"], best["interval"])
     notes = "、".join(best["confirm_notes"][:4]) if best["confirm_notes"] else "已满足基础确认"
     overall_true_win_rate = get_overall_true_win_rate_text()
+    title = "开多信号" if best["side"] == "long" else "开空信号"
 
     return (
-        f"🚨【{symbol} {best['interval']}开多信号】\n"
+        f"🚨【{symbol} {best['interval']}{title}】\n"
         f"时间（中国）：{fmt_time_full(dt_cn)}\n"
         f"当前价格：{fmt_price(best['symbol'], best['latest_price'])}\n"
-        f"做多思路：{best['scenario_name']}\n"
-        f"做多区间：{fmt_price(best['symbol'], best['entry_zone_low'])} - {fmt_price(best['symbol'], best['entry_zone_high'])}\n"
+        f"方向：{side_text(best['side'])}\n"
+        f"思路：{best['scenario_name']}\n"
+        f"开单区间：{fmt_price(best['symbol'], best['entry_zone_low'])} - {fmt_price(best['symbol'], best['entry_zone_high'])}\n"
         f"建议开单价：{fmt_price(best['symbol'], entry_price)}\n"
         f"止损：{fmt_price(best['symbol'], best['stop_loss'])}\n"
         f"止盈：{fmt_price(best['symbol'], best['take_profit'])}\n"
@@ -1019,6 +1211,7 @@ def result_to_live_row(result: dict) -> dict:
     return {
         "symbol": short_symbol(result["symbol"]),
         "interval": result["interval"],
+        "side": side_text(result["side"]),
         "status": result["status"],
         "scenario_name": result["scenario_name"],
         "latest_price": fmt_price(result["symbol"], result["latest_price"]),
@@ -1054,7 +1247,7 @@ def run_one_live_cycle():
         if symbol not in latest_prices:
             continue
 
-        for interval in INTERVALS:
+        for interval in ["1h", "4h", "1d"]:
             try:
                 indicator_cache[(symbol, interval)] = calc_indicators_live(symbol, interval)
             except Exception as e:
@@ -1073,20 +1266,23 @@ def run_one_live_cycle():
                 continue
 
             ind = indicator_cache.get((symbol, interval))
+            ind_d1 = indicator_cache.get((symbol, "1d"))
+
             if ind is None:
                 interval_errors.append(f"{symbol} 缺少 {interval} 指标")
                 continue
-
-            env_4h = indicator_cache.get((symbol, "4h"))
+            if ind_d1 is None:
+                interval_errors.append(f"{symbol} 缺少 1d 指标")
+                continue
 
             try:
                 result = evaluate_symbol(
-                    symbol,
-                    interval,
-                    latest_prices[symbol],
-                    ind,
-                    env_4h,
-                    STRATEGY_CONFIG
+                    symbol=symbol,
+                    interval=interval,
+                    latest_price=latest_prices[symbol],
+                    ind=ind,
+                    ind_d1=ind_d1,
+                    cfg=STRATEGY_CONFIG,
                 )
                 interval_results.append(result)
                 all_results.append(result)
@@ -1107,7 +1303,7 @@ def run_one_live_cycle():
             messages.append({
                 "level": "warning",
                 "interval": interval,
-                "silent": False,
+                "silent": True,
                 "text": text,
             })
             continue
@@ -1133,7 +1329,7 @@ def run_one_live_cycle():
             text = build_watch_message(best, dt_cn)
             silent = True
         else:
-            text = build_no_long_message(best, dt_cn)
+            text = build_no_trade_message(best, dt_cn)
             silent = True
 
         extra_errors = []
@@ -1167,14 +1363,11 @@ def run_one_live_cycle():
 
 # ======================================
 # 发送执行器
+# 只有 4h entry 才三连提醒 + 置顶
+# 其他全部静默且不置顶
 # ======================================
 def send_item_with_strategy(item: dict):
     global LAST_PINNED_MESSAGE_ID
-
-    if not should_send_message(item):
-        print("-" * 100)
-        print(f"跳过重复消息：{item['level']} {item['interval']}")
-        return
 
     level = item["level"]
     interval = item["interval"]
@@ -1183,18 +1376,14 @@ def send_item_with_strategy(item: dict):
 
     first_message_id = None
 
-    # 只有 4h 开单才三连提醒
     if level == "entry" and interval == "4h":
         repeat_times = max(1, ENTRY_BURST_COUNT)
     else:
         repeat_times = 1
 
-    send_success = False
-
     for i in range(repeat_times):
         try:
             resp = send_telegram_message(text=text, silent=silent)
-            send_success = True
 
             if resp and isinstance(resp, dict):
                 result = resp.get("result", {})
@@ -1210,10 +1399,6 @@ def send_item_with_strategy(item: dict):
         if i < repeat_times - 1:
             time.sleep(ENTRY_BURST_GAP_SECONDS)
 
-    if send_success:
-        remember_sent_message(item)
-
-    # 只有 4h 开单才置顶
     if level == "entry" and interval == "4h" and PIN_ENTRY_MESSAGE and first_message_id:
         try:
             if UNPIN_PREVIOUS_ENTRY_BEFORE_PIN and LAST_PINNED_MESSAGE_ID:
@@ -1227,7 +1412,7 @@ def send_item_with_strategy(item: dict):
             print(f"置顶失败：{str(e)}")
 
 # ======================================
-# 主程序：执行一轮就退出
+# 主程序：单次执行，适合 GitHub Actions
 # ======================================
 def main():
     messages = run_one_live_cycle()
