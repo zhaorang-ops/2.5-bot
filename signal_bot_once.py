@@ -1,7 +1,6 @@
 import os
 import time
 import json
-import math
 import random
 from typing import Optional, List, Tuple
 
@@ -29,7 +28,8 @@ SYMBOLS = [
     "BNBUSDT",
 ]
 
-INTERVALS = ["1h", "4h"]
+# 只保留 4h + D1
+INTERVALS = ["4h", "1d"]
 
 PRIORITY = {
     "BTCUSDT": 1,
@@ -69,7 +69,7 @@ TELEGRAM_RETRY_SLEEP_SECONDS = 1.5
 
 # ======================================
 # 通知策略
-# 只有 4h entry 才响铃 + 置顶
+# 只有 D1 entry 才响铃 + 置顶
 # 其他全部静默
 # ======================================
 ENTRY_BURST_COUNT = 3
@@ -116,6 +116,11 @@ def now_cn():
 def fmt_time_full(dt):
     return dt.strftime("%Y-%m-%d %H:%M")
 
+def display_interval(interval: str) -> str:
+    if interval == "1d":
+        return "D1"
+    return interval
+
 def short_symbol(symbol: str) -> str:
     return symbol.replace("USDT", "")
 
@@ -142,7 +147,7 @@ def level_priority(level: str) -> int:
     return mp.get(level, 0)
 
 def interval_rank(interval: str) -> int:
-    mp = {"1h": 1, "4h": 2}
+    mp = {"4h": 1, "1d": 2}
     return mp.get(interval, 99)
 
 def rr_to_score(rr: float) -> int:
@@ -159,12 +164,13 @@ def rr_to_score(rr: float) -> int:
     return 0
 
 def suggest_position(score: int, interval: str) -> str:
-    if interval == "4h":
+    if interval == "1d":
         if score >= 85:
             return "30%"
         if score >= 78:
             return "20%"
         return "10%"
+
     if score >= 84:
         return "20%"
     if score >= 75:
@@ -421,7 +427,7 @@ def fetch_latest_price(symbol: str) -> float:
     data = request_json_with_retry("/api/v3/ticker/price", {"symbol": symbol})
     return float(data["price"])
 
-def fetch_klines_live(symbol: str, interval: str, limit: int = 300):
+def fetch_klines_live(symbol: str, interval: str, limit: int = 320):
     data = request_json_with_retry(
         "/api/v3/klines",
         {"symbol": symbol, "interval": interval, "limit": limit}
@@ -445,7 +451,6 @@ def fetch_klines_live(symbol: str, interval: str, limit: int = 300):
 def calc_indicators_live(symbol: str, interval: str):
     data = fetch_klines_live(symbol, interval, 320)
 
-    # 只用已完成K线，去掉最后一根未完成K线
     opens = data["opens"][:-1]
     highs = data["highs"][:-1]
     lows = data["lows"][:-1]
@@ -724,8 +729,10 @@ def estimate_model_win_rate(side: str, symbol: str, interval: str, scenario_key:
     elif symbol == "SOLUSDT":
         win += 1
 
-    if interval == "4h":
-        win += 2
+    if interval == "1d":
+        win += 3
+    elif interval == "4h":
+        win += 1
 
     if scenario_key in ("trend_pullback_long", "trend_pullback_short"):
         win += 3
@@ -1073,7 +1080,6 @@ def evaluate_symbol(symbol: str, interval: str, latest_price: float, ind: dict, 
             build_range_bottom_long(symbol, interval, latest_price, ind, cfg),
         ])
 
-        # 明显加速下跌时，削弱做多
         if latest_price < ind["recent_low_10"] and ind["macd_hist"] < ind["macd_hist_prev"] and ind["rsi14"] < 35:
             for p in plans:
                 p["score"] = max(0, p["score"] - 10)
@@ -1091,7 +1097,6 @@ def evaluate_symbol(symbol: str, interval: str, latest_price: float, ind: dict, 
             build_range_top_short(symbol, interval, latest_price, ind, cfg),
         ])
 
-        # 明显加速拉升时，削弱做空
         if latest_price > ind["recent_high_10"] and ind["macd_hist"] > ind["macd_hist_prev"] and ind["rsi14"] > 65:
             for p in plans:
                 p["score"] = max(0, p["score"] - 10)
@@ -1116,6 +1121,17 @@ def evaluate_symbol(symbol: str, interval: str, latest_price: float, ind: dict, 
     return best
 
 # ======================================
+# 4h 只做预警：把 4h 的 entry 强制降级为 warning
+# ======================================
+def downgrade_4h_entry_to_warning(best: dict) -> dict:
+    if best["interval"] == "4h" and best["level"] == "entry":
+        best = dict(best)
+        best["level"] = "warning"
+        best["status"] = "预警"
+        best["action"] = "4h 只做预警，等待 D1 级别开单信号。"
+    return best
+
+# ======================================
 # 消息模板
 # ======================================
 def side_text(side: str) -> str:
@@ -1128,7 +1144,7 @@ def side_text(side: str) -> str:
 def build_no_trade_message(best: dict, dt_cn: datetime) -> str:
     symbol = short_symbol(best["symbol"])
     return (
-        f"⛔【{symbol} {best['interval']}暂不做单】\n"
+        f"⛔【{symbol} {display_interval(best['interval'])}暂不做单】\n"
         f"时间（中国）：{fmt_time_full(dt_cn)}\n"
         f"当前价格：{fmt_price(best['symbol'], best['latest_price'])}\n"
         f"方向：{side_text(best['side'])}\n"
@@ -1139,7 +1155,7 @@ def build_no_trade_message(best: dict, dt_cn: datetime) -> str:
 def build_watch_message(best: dict, dt_cn: datetime) -> str:
     symbol = short_symbol(best["symbol"])
     return (
-        f"⏸️【{symbol} {best['interval']}观望】\n"
+        f"⏸️【{symbol} {display_interval(best['interval'])}观望】\n"
         f"时间（中国）：{fmt_time_full(dt_cn)}\n"
         f"当前价格：{fmt_price(best['symbol'], best['latest_price'])}\n"
         f"方向：{side_text(best['side'])}\n"
@@ -1160,7 +1176,7 @@ def build_warning_message(best: dict, dt_cn: datetime) -> str:
     overall_true_win_rate = get_overall_true_win_rate_text()
 
     return (
-        f"⚠️【{symbol} {best['interval']}预警】\n"
+        f"⚠️【{symbol} {display_interval(best['interval'])}预警】\n"
         f"时间（中国）：{fmt_time_full(dt_cn)}\n"
         f"当前价格：{fmt_price(best['symbol'], best['latest_price'])}\n"
         f"方向：{side_text(best['side'])}\n"
@@ -1186,7 +1202,7 @@ def build_entry_message(best: dict, dt_cn: datetime) -> str:
     title = "开多信号" if best["side"] == "long" else "开空信号"
 
     return (
-        f"🚨【{symbol} {best['interval']}{title}】\n"
+        f"🚨【{symbol} {display_interval(best['interval'])}{title}】\n"
         f"时间（中国）：{fmt_time_full(dt_cn)}\n"
         f"当前价格：{fmt_price(best['symbol'], best['latest_price'])}\n"
         f"方向：{side_text(best['side'])}\n"
@@ -1210,7 +1226,7 @@ def build_entry_message(best: dict, dt_cn: datetime) -> str:
 def result_to_live_row(result: dict) -> dict:
     return {
         "symbol": short_symbol(result["symbol"]),
-        "interval": result["interval"],
+        "interval": display_interval(result["interval"]),
         "side": side_text(result["side"]),
         "status": result["status"],
         "scenario_name": result["scenario_name"],
@@ -1247,7 +1263,7 @@ def run_one_live_cycle():
         if symbol not in latest_prices:
             continue
 
-        for interval in ["1h", "4h", "1d"]:
+        for interval in ["4h", "1d"]:
             try:
                 indicator_cache[(symbol, interval)] = calc_indicators_live(symbol, interval)
             except Exception as e:
@@ -1284,6 +1300,7 @@ def run_one_live_cycle():
                     ind_d1=ind_d1,
                     cfg=STRATEGY_CONFIG,
                 )
+                result = downgrade_4h_entry_to_warning(result)
                 interval_results.append(result)
                 all_results.append(result)
             except Exception as e:
@@ -1291,7 +1308,7 @@ def run_one_live_cycle():
 
         if not interval_results:
             text = (
-                f"⚠️【{interval}分析失败】\n"
+                f"⚠️【{display_interval(interval)}分析失败】\n"
                 f"时间（中国）：{fmt_time_full(dt_cn)}\n"
                 f"本周期没有可用结果。"
             )
@@ -1321,7 +1338,7 @@ def run_one_live_cycle():
 
         if best["level"] == "entry":
             text = build_entry_message(best, dt_cn)
-            silent = not (best["interval"] == "4h")   # 只有4h开单才响
+            silent = not (best["interval"] == "1d")   # 只有 D1 开单才响
         elif best["level"] == "warning":
             text = build_warning_message(best, dt_cn)
             silent = True
@@ -1363,7 +1380,7 @@ def run_one_live_cycle():
 
 # ======================================
 # 发送执行器
-# 只有 4h entry 才三连提醒 + 置顶
+# 只有 D1 entry 才三连提醒 + 置顶
 # 其他全部静默且不置顶
 # ======================================
 def send_item_with_strategy(item: dict):
@@ -1376,7 +1393,7 @@ def send_item_with_strategy(item: dict):
 
     first_message_id = None
 
-    if level == "entry" and interval == "4h":
+    if level == "entry" and interval == "1d":
         repeat_times = max(1, ENTRY_BURST_COUNT)
     else:
         repeat_times = 1
@@ -1399,7 +1416,7 @@ def send_item_with_strategy(item: dict):
         if i < repeat_times - 1:
             time.sleep(ENTRY_BURST_GAP_SECONDS)
 
-    if level == "entry" and interval == "4h" and PIN_ENTRY_MESSAGE and first_message_id:
+    if level == "entry" and interval == "1d" and PIN_ENTRY_MESSAGE and first_message_id:
         try:
             if UNPIN_PREVIOUS_ENTRY_BEFORE_PIN and LAST_PINNED_MESSAGE_ID:
                 if LAST_PINNED_MESSAGE_ID != first_message_id:
